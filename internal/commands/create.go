@@ -46,15 +46,6 @@ func newRegoFile(filePath string, contents string) (regoFile, error) {
 	return regoFile, nil
 }
 
-func moduleHasViolationRule(module *ast.Module) bool {
-	for _, rule := range module.Rules {
-		if strings.HasPrefix(rule.Head.String(), "violation[") {
-			return true
-		}
-	}
-	return false
-}
-
 func newCreateCommand() *cobra.Command {
 	cmd := cobra.Command{
 		Use:   "create <dir>",
@@ -69,6 +60,14 @@ func newCreateCommand() *cobra.Command {
 				return fmt.Errorf("bind lib flag: %w", err)
 			}
 
+			if err := viper.BindPFlag("output", cmd.PersistentFlags().Lookup("output")); err != nil {
+				return fmt.Errorf("bind output flag: %w", err)
+			}
+
+			if err := viper.BindPFlag("dryrun", cmd.PersistentFlags().Lookup("dryrun")); err != nil {
+				return fmt.Errorf("bind dryrun flag: %w", err)
+			}
+
 			path := "."
 			if len(args) > 0 {
 				path = args[0]
@@ -79,9 +78,7 @@ func newCreateCommand() *cobra.Command {
 	}
 
 	cmd.PersistentFlags().StringP("output", "o", "", "Specify an output directory for the Gatekeeper resources")
-	viper.BindPFlag("output", cmd.PersistentFlags().Lookup("output"))
 	cmd.PersistentFlags().BoolP("dryrun", "d", false, "Sets the enforcement action of the constraints to dryrun")
-	viper.BindPFlag("dryrun", cmd.PersistentFlags().Lookup("dryrun"))
 
 	return &cmd
 }
@@ -120,40 +117,26 @@ func runCreateCommand(path string) error {
 		return fmt.Errorf("load libraries: %w", err)
 	}
 
-	var templateFileName, constraintFileName, outputDir string
-	outputFlag := viper.GetString("output")
-	if outputFlag == "" {
-		templateFileName = "template.yaml"
-		constraintFileName = "constraint.yaml"
-	} else {
-		outputDir = outputFlag
-	}
-
 	for _, policy := range policies {
 		policyDir := filepath.Dir(policy.filePath)
 
-		if outputFlag == "" {
-			outputDir = policyDir
-		} else {
-			templateFileName = fmt.Sprintf("template_%s.yaml", getKindFromPath(policy.filePath))
-			constraintFileName = fmt.Sprintf("constraint_%s.yaml", getKindFromPath(policy.filePath))
+		templatePath := filepath.Join(policyDir, "template.yaml")
+		constraintPath := filepath.Join(policyDir, "constraint.yaml")
+		if viper.GetString("output") != "" {
+			templateFile := fmt.Sprintf("template_%s.yaml", getKindFromPath(policy.filePath))
+			templatePath = filepath.Join(viper.GetString("output"), templateFile)
+
+			constraintFile := fmt.Sprintf("constraint_%s.yaml", getKindFromPath(policy.filePath))
+			constraintPath = filepath.Join(viper.GetString("output"), constraintFile)
 		}
 
-		if _, err := os.Stat(outputDir); os.IsNotExist(err) {
-			err := os.MkdirAll(outputDir, os.ModePerm)
-			if err != nil {
-				return fmt.Errorf("create output directory: %w", err)
-			}
-		}
-
-		constraintTemplate := getConstraintTemplate(policy, libraries)
-		constraintTemplateBytes, err := yaml.Marshal(&constraintTemplate)
+		template := getConstraintTemplate(policy, libraries)
+		templateBytes, err := yaml.Marshal(&template)
 		if err != nil {
-			return fmt.Errorf("marshal constrainttemplate: %w", err)
+			return fmt.Errorf("marshal template: %w", err)
 		}
 
-		err = ioutil.WriteFile(filepath.Join(outputDir, templateFileName), constraintTemplateBytes, os.ModePerm)
-		if err != nil {
+		if err := ioutil.WriteFile(templatePath, templateBytes, os.ModePerm); err != nil {
 			return fmt.Errorf("writing template: %w", err)
 		}
 
@@ -167,8 +150,7 @@ func runCreateCommand(path string) error {
 			return fmt.Errorf("marshal constraint: %w", err)
 		}
 
-		err = ioutil.WriteFile(filepath.Join(outputDir, constraintFileName), constraintBytes, os.ModePerm)
-		if err != nil {
+		if err := ioutil.WriteFile(constraintPath, constraintBytes, os.ModePerm); err != nil {
 			return fmt.Errorf("writing constraint: %w", err)
 		}
 	}
@@ -314,7 +296,14 @@ func loadPolicyFiles(policyContents map[string]string) ([]regoFile, error) {
 			return nil, fmt.Errorf("parse module: %w", err)
 		}
 
-		if !moduleHasViolationRule(module) {
+		var hasViolationRule bool
+		for _, rule := range module.Rules {
+			if strings.HasPrefix(rule.Head.String(), "violation[") {
+				hasViolationRule = true
+			}
+		}
+
+		if !hasViolationRule {
 			continue
 		}
 
